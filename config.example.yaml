@@ -1,0 +1,14 @@
+server:
+  port: 8080
+  session_key: "your-secret-session-key-at-least-32-bytes-long"
+
+cas:
+  base_url: "https://cas.example.com/"
+  login_path: "/login"              # 可选，默认为 "/login"
+  validate_path: "/p3/serviceValidate"  # 可选，默认为 "/p3/serviceValidate"
+  use_json: true  # 使用JSON格式（添加format=json参数），推荐使用
+
+routes:
+  - name: finops
+    path: "/finops"
+    target: "http://127.0.0.1:8000"
