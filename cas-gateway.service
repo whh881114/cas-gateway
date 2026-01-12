@@ -1,0 +1,29 @@
+[Unit]
+Description=CAS Gateway
+After=network.target
+
+[Service]
+Type=simple
+
+# 推荐建一个专用用户，先用 root 也行
+User=root
+Group=root
+
+# 程序所在目录
+WorkingDirectory=/data/cas-gateway
+
+# 当前程序支持通过位置参数传递配置文件路径
+# 如果需要 -config, -logfile, -pidfile 等参数，需要修改程序支持
+ExecStart=/data/cas-gateway/cas-gateway \
+    /data/cas-gateway/config.yaml
+
+# 挂了自动拉起
+Restart=on-failure
+RestartSec=3s
+
+# 日志输出到 systemd journal
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
