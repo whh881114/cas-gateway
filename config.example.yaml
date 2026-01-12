@@ -8,7 +8,7 @@ cas:
   validate_path: "/p3/serviceValidate"  # 可选，默认为 "/p3/serviceValidate"
   use_json: true  # 使用JSON格式（添加format=json参数），推荐使用
 
-routes:
-  - name: finops
-    path: "/finops"
-    target: "http://127.0.0.1:8000"
+route:
+  name: finops
+  path: "/"
+  target: "http://127.0.0.1:8000"

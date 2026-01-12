@@ -47,26 +47,14 @@ func validateConfig(cfg *models.Config) error {
 	}
 
 	// 验证路由配置
-	if len(cfg.Routes) == 0 {
-		return fmt.Errorf("至少需要配置一个路由")
+	if cfg.Route.Name == "" {
+		return fmt.Errorf("路由名称不能为空")
 	}
-
-	// 验证路由配置
-	pathMap := make(map[string]bool)
-	for _, route := range cfg.Routes {
-		if route.Name == "" {
-			return fmt.Errorf("路由名称不能为空")
-		}
-		if route.Path == "" {
-			return fmt.Errorf("路由路径不能为空: %s", route.Name)
-		}
-		if route.Target == "" {
-			return fmt.Errorf("路由目标不能为空: %s", route.Name)
-		}
-		if pathMap[route.Path] {
-			return fmt.Errorf("路由路径重复: %s", route.Path)
-		}
-		pathMap[route.Path] = true
+	if cfg.Route.Path == "" {
+		return fmt.Errorf("路由路径不能为空: %s", cfg.Route.Name)
+	}
+	if cfg.Route.Target == "" {
+		return fmt.Errorf("路由目标不能为空: %s", cfg.Route.Name)
 	}
 
 	return nil

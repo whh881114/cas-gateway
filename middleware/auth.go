@@ -3,11 +3,9 @@ package middleware
 import (
 	"log"
 	"net/http"
-	"net/url"
 	"regexp"
 	"strings"
 	"cas-gateway/auth"
-	"cas-gateway/models"
 	"cas-gateway/proxy"
 
 	"github.com/gorilla/sessions"
@@ -66,67 +64,35 @@ func (am *AuthMiddleware) Handler(next http.Handler) http.Handler {
 			return
 		}
 
-		// 获取路由配置（检查路由是否存在）
-		route, exists := am.proxyManager.GetRoute(r.URL.Path)
-		
-		// 如果没有匹配到路由，尝试根据 Referer 或路径前缀智能匹配
-		if !exists {
-			route = am.findRouteByReferer(r)
-			if route != nil {
-				log.Printf("[路由] 根据 Referer 匹配到路由: %s -> %s (请求: %s)", route.Path, route.Target, r.URL.Path)
-			} else {
-				// 如果还是找不到，尝试根据路径前缀匹配（如 /static/ 可能属于某个路由）
-				route = am.findRouteByPathPrefix(r.URL.Path)
-				if route != nil {
-					log.Printf("[路由] 根据路径前缀匹配到路由: %s -> %s (请求: %s)", route.Path, route.Target, r.URL.Path)
-				} else {
-					allRoutes := am.proxyManager.GetAllRoutes()
-					if len(allRoutes) > 0 {
-						route = &allRoutes[0]
-						log.Printf("[路由] 未匹配到路由，使用第一个路由作为默认: %s -> %s (请求: %s)", route.Path, route.Target, r.URL.Path)
-					} else {
-						log.Printf("[路由] 未匹配到路由且无可用路由: %s", r.URL.Path)
-						next.ServeHTTP(w, r)
-						return
-					}
-				}
-			}
-		} else {
-			log.Printf("[路由] 匹配到路由: %s -> %s", route.Path, route.Target)
+		// 获取路由配置（单个路由，所有请求都转发到同一个后端）
+		route := am.proxyManager.GetRoute()
+		if route == nil {
+			log.Printf("[路由] 路由配置不存在")
+			http.NotFound(w, r)
+			return
 		}
 
 		// 静态文件直接转发到后端系统，不进行认证检查（参考原 Node.js 版本的逻辑）
 		if isStaticFile(r.URL.Path) {
 			log.Printf("[静态文件] 直接转发: %s -> %s", r.URL.Path, route.Target)
-			// 直接使用匹配到的路由的代理转发，不调用next
-			proxy, exists := am.proxyManager.GetProxy(route.Path)
-			if exists {
-				// 对于静态文件，不剥离路径前缀，直接转发完整路径
-				proxy.ServeHTTP(w, r)
-			} else {
-				log.Printf("[静态文件] 路由 %s 的代理不存在", route.Path)
-				http.NotFound(w, r)
-			}
+			// 直接使用代理转发，不剥离路径前缀
+			proxy := am.proxyManager.GetProxy()
+			proxy.ServeHTTP(w, r)
 			return
 		}
 
 		// 如果路由配置了跳过认证，直接转发（如Grafana等自带认证的系统）
 		if route.SkipAuth {
 			log.Printf("[认证] 路由 %s 跳过CAS认证，直接转发", route.Path)
-			proxy, exists := am.proxyManager.GetProxy(route.Path)
-			if exists {
-				// 如果请求路径包含路由前缀，需要剥离前缀
-				if strings.HasPrefix(r.URL.Path, route.Path+"/") {
-					r.URL.Path = strings.TrimPrefix(r.URL.Path, route.Path)
-					if r.URL.Path == "" {
-						r.URL.Path = "/"
-					}
+			proxy := am.proxyManager.GetProxy()
+			// 如果请求路径包含路由前缀，需要剥离前缀
+			if route.Path != "" && route.Path != "/" && strings.HasPrefix(r.URL.Path, route.Path) {
+				r.URL.Path = strings.TrimPrefix(r.URL.Path, route.Path)
+				if r.URL.Path == "" {
+					r.URL.Path = "/"
 				}
-				proxy.ServeHTTP(w, r)
-			} else {
-				log.Printf("[认证] 路由 %s 的代理不存在", route.Path)
-				http.NotFound(w, r)
 			}
+			proxy.ServeHTTP(w, r)
 			return
 		}
 
@@ -145,6 +111,13 @@ func (am *AuthMiddleware) Handler(next http.Handler) http.Handler {
 				}
 			}
 			log.Printf("[认证] 已认证用户: %s, 转发请求: %s", user, r.URL.Path)
+			// 如果请求路径包含路由前缀，需要剥离前缀
+			if route.Path != "" && route.Path != "/" && strings.HasPrefix(r.URL.Path, route.Path) {
+				r.URL.Path = strings.TrimPrefix(r.URL.Path, route.Path)
+				if r.URL.Path == "" {
+					r.URL.Path = "/"
+				}
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -153,8 +126,12 @@ func (am *AuthMiddleware) Handler(next http.Handler) http.Handler {
 		if am.authProvider.IsLoginPath(r.URL.String()) {
 			ticket, err := am.authProvider.ExtractTicket(r.URL.String())
 			if err == nil {
-				// 验证ticket（使用原始请求路径构建service URL）
-				serviceURL := am.authProvider.BuildServiceURL(r, r.URL.Path)
+				// 验证ticket（使用路由路径构建service URL）
+				servicePath := route.Path
+				if servicePath == "" {
+					servicePath = "/"
+				}
+				serviceURL := am.authProvider.BuildServiceURL(r, servicePath)
 				userInfo, err := am.authProvider.ValidateTicket(ticket, serviceURL)
 				if err == nil {
 					// 验证成功，保存session（使用oaid作为用户标识）
@@ -164,13 +141,13 @@ func (am *AuthMiddleware) Handler(next http.Handler) http.Handler {
 					}
 					session.Values[IsAuthenticatedKey] = true
 					if err := session.Save(r, w); err == nil {
-						// 重定向到原始路径（去除ticket参数）
-						u := *r.URL
-						q := u.Query()
-						q.Del("ticket")
-						u.RawQuery = q.Encode()
-						log.Printf("[认证] 认证成功，重定向到: %s", u.String())
-						http.Redirect(w, r, u.String(), http.StatusFound)
+						// 重定向到路由路径（去除ticket参数）
+						redirectPath := servicePath
+						if redirectPath == "/" {
+							redirectPath = ""
+						}
+						log.Printf("[认证] 认证成功，重定向到: %s", redirectPath)
+						http.Redirect(w, r, redirectPath, http.StatusFound)
 						return
 					}
 				} else {
@@ -180,7 +157,11 @@ func (am *AuthMiddleware) Handler(next http.Handler) http.Handler {
 		}
 
 		// 未认证，跳转到登录页（参考原代码逻辑）
-		serviceURL := am.authProvider.BuildServiceURL(r, r.URL.Path)
+		servicePath := route.Path
+		if servicePath == "" {
+			servicePath = "/"
+		}
+		serviceURL := am.authProvider.BuildServiceURL(r, servicePath)
 		loginURL := am.authProvider.GetLoginURL(serviceURL)
 		log.Printf("[认证] 未认证，跳转到登录页: %s", loginURL)
 		http.Redirect(w, r, loginURL, http.StatusFound)
@@ -204,48 +185,3 @@ func (am *AuthMiddleware) Logout(w http.ResponseWriter, r *http.Request) {
 	session.Save(r, w)
 }
 
-// findRouteByReferer 根据 Referer 头查找对应的路由
-func (am *AuthMiddleware) findRouteByReferer(r *http.Request) *models.RouteConfig {
-	referer := r.Header.Get("Referer")
-	if referer == "" {
-		return nil
-	}
-
-	refererURL, err := url.Parse(referer)
-	if err != nil {
-		return nil
-	}
-
-	// 从 Referer 中提取路径，查找匹配的路由
-	refererPath := refererURL.Path
-	allRoutes := am.proxyManager.GetAllRoutes()
-	
-	for i := range allRoutes {
-		route := &allRoutes[i]
-		if strings.HasPrefix(refererPath, route.Path+"/") || refererPath == route.Path {
-			return route
-		}
-	}
-
-	return nil
-}
-
-// findRouteByPathPrefix 根据路径前缀查找路由（用于处理 /static/ 等路径）
-func (am *AuthMiddleware) findRouteByPathPrefix(reqPath string) *models.RouteConfig {
-	allRoutes := am.proxyManager.GetAllRoutes()
-	
-	// 找到最长匹配的路由前缀
-	var matchedRoute *models.RouteConfig
-	maxLen := 0
-	
-	for i := range allRoutes {
-		route := &allRoutes[i]
-		// 如果请求路径以路由路径开头，或者路由路径是请求路径的前缀
-		if strings.HasPrefix(reqPath, route.Path) && len(route.Path) > maxLen {
-			matchedRoute = route
-			maxLen = len(route.Path)
-		}
-	}
-	
-	return matchedRoute
-}

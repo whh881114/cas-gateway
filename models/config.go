@@ -24,7 +24,7 @@ type CASConfig struct {
 
 // Config 主配置结构
 type Config struct {
-	Server ServerConfig  `yaml:"server"`
-	CAS    CASConfig     `yaml:"cas"`
-	Routes []RouteConfig `yaml:"routes"` // 路由配置
+	Server ServerConfig `yaml:"server"`
+	CAS    CASConfig    `yaml:"cas"`
+	Route  RouteConfig  `yaml:"route"` // 路由配置（单个路由）
 }

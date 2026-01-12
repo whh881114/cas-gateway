@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strings"
 	"cas-gateway/auth"
 	"cas-gateway/auth/cas"
 	"cas-gateway/config"
@@ -27,10 +28,10 @@ func main() {
 
 	log.Printf("配置加载成功，服务器端口: %d", cfg.Server.Port)
 	log.Printf("CAS服务器: %s", cfg.CAS.BaseURL)
-	log.Printf("已配置 %d 个路由", len(cfg.Routes))
+	log.Printf("路由配置: %s -> %s", cfg.Route.Path, cfg.Route.Target)
 
 	// 创建代理管理器
-	proxyManager, err := proxy.NewProxyManager(cfg.Routes)
+	proxyManager, err := proxy.NewProxyManager(&cfg.Route)
 	if err != nil {
 		log.Fatalf("创建代理管理器失败: %v", err)
 	}
@@ -48,34 +49,32 @@ func main() {
 	// 创建HTTP处理器
 	mux := http.NewServeMux()
 
-	// 为每个路由注册代理处理器
-	for _, route := range cfg.Routes {
-		proxy, exists := proxyManager.GetProxy(route.Path)
-		if !exists {
-			log.Printf("警告: 路由 %s 的代理不存在", route.Name)
-			continue
-		}
-
-		// 创建代理处理器（包含路径重写）
-		handler := http.StripPrefix(route.Path, proxy)
-
-		// 使用闭包捕获route.Path
-		path := route.Path
-
+	// 注册路由处理器（所有请求都转发到同一个后端）
+	proxyHandler := proxyManager.GetProxy()
+	route := proxyManager.GetRoute()
+	
+	// 如果配置了路径前缀，注册带路径前缀的路由
+	if route.Path != "" && route.Path != "/" {
 		// 注册带尾斜杠的路径（会匹配所有子路径）
-		mux.Handle(path+"/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			log.Printf("[路由处理] 处理请求: %s %s (路由: %s)", r.Method, r.URL.Path, path)
-			handler.ServeHTTP(w, r)
+		mux.Handle(route.Path+"/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			log.Printf("[路由处理] 处理请求: %s %s (路由: %s)", r.Method, r.URL.Path, route.Path)
+			// 剥离路径前缀
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, route.Path)
+			if r.URL.Path == "" {
+				r.URL.Path = "/"
+			}
+			proxyHandler.ServeHTTP(w, r)
 		}))
 
 		// 注册精确路径（用于匹配路径本身）
-		mux.Handle(path, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			log.Printf("[路由处理] 处理请求: %s %s (路由: %s)", r.Method, r.URL.Path, path)
-			handler.ServeHTTP(w, r)
+		mux.Handle(route.Path, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			log.Printf("[路由处理] 处理请求: %s %s (路由: %s)", r.Method, r.URL.Path, route.Path)
+			r.URL.Path = "/"
+			proxyHandler.ServeHTTP(w, r)
 		}))
-
-		log.Printf("路由已注册: %s -> %s", route.Path, route.Target)
 	}
+
+	log.Printf("路由已注册: %s -> %s", route.Path, route.Target)
 
 	// 健康检查端点
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -107,30 +106,22 @@ func main() {
 		http.Redirect(w, r, logoutURL, http.StatusFound)
 	})
 
-	// 添加通配符路由，处理所有未匹配的请求（如 /static/... 等）
-	// 中间件会根据 Referer 或路径前缀智能匹配路由，这里只需要提供一个兜底处理
+	// 添加通配符路由，处理所有未匹配的请求（如 /api/...、/static/... 等）
+	// 所有请求都转发到同一个后端服务
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// 跳过已经注册的路径
 		if r.URL.Path == "/health" || r.URL.Path == "/logout" {
 			return
 		}
-		// 查找匹配的路由
-		route, exists := proxyManager.GetRoute(r.URL.Path)
-		if !exists {
-			// 如果找不到路由，返回404
-			log.Printf("[默认路由] 未找到匹配的路由: %s", r.URL.Path)
-			http.NotFound(w, r)
-			return
-		}
-		proxy, exists := proxyManager.GetProxy(route.Path)
-		if !exists {
-			log.Printf("[默认路由] 路由 %s 的代理不存在", route.Path)
-			http.NotFound(w, r)
-			return
+		// 如果请求路径包含路由前缀，需要剥离前缀
+		if route.Path != "" && route.Path != "/" && strings.HasPrefix(r.URL.Path, route.Path) {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, route.Path)
+			if r.URL.Path == "" {
+				r.URL.Path = "/"
+			}
 		}
 		log.Printf("[默认路由] 处理请求: %s %s -> %s", r.Method, r.URL.Path, route.Target)
-		// 直接使用代理，不剥离路径前缀（因为路径可能不包含路由前缀）
-		proxy.ServeHTTP(w, r)
+		proxyHandler.ServeHTTP(w, r)
 	})
 
 	// 应用认证中间件
@@ -139,7 +130,11 @@ func main() {
 	// 启动服务器
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	log.Printf("CAS Gateway 启动在端口 %d", cfg.Server.Port)
-	log.Printf("访问 http://localhost%s/finops 开始使用", addr)
+	if route.Path != "" && route.Path != "/" {
+		log.Printf("访问 http://localhost%s%s 开始使用", addr, route.Path)
+	} else {
+		log.Printf("访问 http://localhost%s 开始使用", addr)
+	}
 
 	if err := http.ListenAndServe(addr, handler); err != nil {
 		log.Fatalf("服务器启动失败: %v", err)
