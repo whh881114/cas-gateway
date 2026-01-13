@@ -25,5 +25,9 @@ RestartSec=3s
 StandardOutput=journal
 StandardError=journal
 
+# 可选：如果需要将日志同时写入文件，可以使用以下方式
+StandardOutput=append:/var/log/cas-gateway.log
+StandardError=append:/var/log/cas-gateway.err
+
 [Install]
 WantedBy=multi-user.target
